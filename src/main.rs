@@ -57,6 +57,32 @@ impl Regex {
                         patterns.push(PatternElement::Literal(c));
                     }
                 }
+                // look ahead to see if this character group closes
+                '[' if chars.as_str().contains(']') => {
+                    let mut group_chars = Vec::new();
+                    let mut is_neg = false;
+                    let mut next_char = chars.next();
+                    if let Some(c) = next_char {
+                        if c == '^' {
+                            is_neg = true;
+                            next_char = chars.next();
+                        }
+                    }
+                    while let Some(c) = next_char {
+                        match c {
+                            ']' => break,
+                            c => group_chars.push(c),
+                        }
+
+                        next_char = chars.next();
+                    }
+
+                    if is_neg {
+                        patterns.push(PatternElement::NegCharGroup(group_chars));
+                    } else {
+                        patterns.push(PatternElement::PosCharGroup(group_chars));
+                    }
+                }
                 c => patterns.push(PatternElement::Literal(c)),
             }
         }
@@ -95,6 +121,15 @@ impl Regex {
                     };
                     input = input.get(i + 1..).unwrap_or_default();
                 }
+                PatternElement::PosCharGroup(chars) => {
+                    let Some(i) = input.chars().position(|c| chars.contains(&c)) else {
+                        return false;
+                    };
+                    input = input.get(i + 1..).unwrap_or_default();
+                }
+                PatternElement::NegCharGroup(chars) => {
+                    todo!()
+                }
             }
         }
 
@@ -126,6 +161,17 @@ impl Regex {
                         return false;
                     }
                 }
+                PatternElement::PosCharGroup(chars) => {
+                    if let Some(c) = input.chars().next() {
+                        if !chars.contains(&c) {
+                            return false;
+                        }
+                        input = input.get(1..).unwrap_or_default();
+                    } else {
+                        return false;
+                    }
+                }
+                PatternElement::NegCharGroup(_) => todo!(),
             }
         }
 
@@ -138,6 +184,8 @@ enum PatternElement {
     Literal(char),
     Digit,
     Alphanumeric,
+    PosCharGroup(Vec<char>),
+    NegCharGroup(Vec<char>),
 }
 
 #[cfg(test)]
@@ -151,6 +199,10 @@ mod tests {
         assert!(regex.matches("apple"));
         assert!(!regex.matches("b"));
         assert!(!regex.matches("bhsrt"));
+
+        let regex = Regex::new("[");
+        assert!(!regex.matches("a"));
+        assert!(regex.matches("app[le"));
     }
 
     #[test]
@@ -181,6 +233,17 @@ mod tests {
         let regex = Regex::new(r"\w");
         dbg!(&regex);
         assert!(regex.matches("1"));
+        assert!(regex.matches("apple2"));
+        assert!(regex.matches("b"));
+        assert!(regex.matches("bh_srt"));
+        assert!(!regex.matches("$!"));
+    }
+
+    #[test]
+    fn test_pos_char_group() {
+        let regex = Regex::new(r"[abc]");
+        dbg!(&regex);
+        assert!(!regex.matches("1"));
         assert!(regex.matches("apple2"));
         assert!(regex.matches("b"));
         assert!(regex.matches("bh_srt"));
