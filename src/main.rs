@@ -47,10 +47,12 @@ impl Regex {
             match c {
                 '\\' => {
                     if let Some(c) = chars.next() {
-                        match c {
-                            'd' => patterns.push(PatternElement::Digit),
+                        let el = match c {
+                            'd' => PatternElement::Digit,
+                            'w' => PatternElement::Alphanumeric,
                             _ => panic!("Invalid regex: {}", pattern),
-                        }
+                        };
+                        patterns.push(el);
                     } else {
                         patterns.push(PatternElement::Literal(c));
                     }
@@ -79,7 +81,16 @@ impl Regex {
                     input = input.get(i + 1..).unwrap_or_default();
                 }
                 PatternElement::Digit => {
-                    let Some(i) = input.chars().position(|c| c.is_numeric()) else {
+                    let Some(i) = input.chars().position(|c| c.is_ascii_digit()) else {
+                        return false;
+                    };
+                    input = input.get(i + 1..).unwrap_or_default();
+                }
+                PatternElement::Alphanumeric => {
+                    let Some(i) = input
+                        .chars()
+                        .position(|c| c.is_ascii_alphanumeric() || c == '_')
+                    else {
                         return false;
                     };
                     input = input.get(i + 1..).unwrap_or_default();
@@ -105,6 +116,16 @@ impl Regex {
                         return false;
                     }
                 }
+                PatternElement::Alphanumeric => {
+                    if let Some(c) = input.chars().next() {
+                        if !(c.is_ascii_alphanumeric() || c == '_') {
+                            return false;
+                        }
+                        input = input.get(1..).unwrap_or_default();
+                    } else {
+                        return false;
+                    }
+                }
             }
         }
 
@@ -116,6 +137,7 @@ impl Regex {
 enum PatternElement {
     Literal(char),
     Digit,
+    Alphanumeric,
 }
 
 #[cfg(test)]
@@ -152,5 +174,16 @@ mod tests {
         let regex = Regex::new(r"\d apple\d\dyu");
         assert!(regex.matches("5 apple16yu"));
         assert!(!regex.matches("5 appe16yu"));
+    }
+
+    #[test]
+    fn test_alphanumeric() {
+        let regex = Regex::new(r"\w");
+        dbg!(&regex);
+        assert!(regex.matches("1"));
+        assert!(regex.matches("apple2"));
+        assert!(regex.matches("b"));
+        assert!(regex.matches("bh_srt"));
+        assert!(!regex.matches("$!"));
     }
 }
