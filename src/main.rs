@@ -45,7 +45,18 @@ impl Regex {
         let mut patterns = Vec::new();
         let mut chars = pattern.chars();
 
-        while let Some(c) = chars.next() {
+        let mut next_char = chars.next();
+        if let Some(c) = next_char {
+            match c {
+                '^' => {
+                    patterns.push(PatternElement::Start);
+                    next_char = chars.next();
+                }
+                _ => {}
+            }
+        }
+
+        while let Some(c) = next_char {
             match c {
                 '\\' => {
                     if let Some(c) = chars.next() {
@@ -90,6 +101,8 @@ impl Regex {
                 }
                 c => patterns.push(PatternElement::Literal(c)),
             }
+
+            next_char = chars.next();
         }
         patterns
     }
@@ -105,6 +118,7 @@ impl Regex {
 
         if let Some(p) = patterns.next() {
             match p {
+                PatternElement::Start => {}
                 PatternElement::Literal(c) => {
                     let Some(i) = input.find(*c) else {
                         return false;
@@ -143,6 +157,7 @@ impl Regex {
 
         for p in patterns {
             match p {
+                PatternElement::Start => unreachable!(),
                 PatternElement::Literal(c) => {
                     if !input.starts_with(*c) {
                         return false;
@@ -203,6 +218,7 @@ enum PatternElement {
     Alphanumeric,
     PosCharGroup(Vec<char>),
     NegCharGroup(Vec<char>),
+    Start,
 }
 
 #[cfg(test)]
@@ -276,5 +292,13 @@ mod tests {
         assert!(!regex.matches("b"));
         assert!(regex.matches("bh_srt"));
         assert!(regex.matches("$!"));
+    }
+
+    #[test]
+    fn test_at_start() {
+        let regex = Regex::new(r"^abc");
+        dbg!(&regex);
+        assert!(regex.matches("abcd"));
+        assert!(!regex.matches("gabcd"));
     }
 }
