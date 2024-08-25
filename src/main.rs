@@ -234,7 +234,11 @@ impl Regex {
                     }
                 }
                 PatternElement::EndAnchor => {
-                    todo!()
+                    if input.chars().next().is_none() {
+                        return (true, "");
+                    } else {
+                        return (false, input_after_first);
+                    }
                 }
             }
         }
@@ -336,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn test() {
+    fn test_partial_match() {
         let regex = Regex::new(r"abc");
         dbg!(&regex);
         assert!(regex.matches("abcd"));
@@ -345,5 +349,23 @@ mod tests {
         dbg!(&regex);
         assert!(regex.matches("1a12a"));
         assert!(!regex.matches("1a2a3a"));
+    }
+
+    #[test]
+    fn test_at_end() {
+        let regex = Regex::new(r"abc$");
+        dbg!(&regex);
+        assert!(regex.matches("abc"));
+        assert!(!regex.matches("abcd"));
+        assert!(regex.matches("abxxabc"));
+    }
+
+    #[test]
+    fn test_at_start_end() {
+        let regex = Regex::new(r"^abc$");
+        dbg!(&regex);
+        assert!(regex.matches("abc"));
+        assert!(!regex.matches("abcd"));
+        assert!(!regex.matches("abxxabc"));
     }
 }
