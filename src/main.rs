@@ -32,27 +32,32 @@ fn main() {
 #[derive(Debug)]
 struct Regex {
     pattern: Vec<PatternElement>,
+    anchor: Anchor,
+}
+
+#[derive(Debug)]
+enum Anchor {
+    None,
+    Start,
 }
 
 impl Regex {
     pub fn new(pattern: &str) -> Self {
-        Self {
-            pattern: Self::parse_regex(pattern),
-        }
+        let (pattern, anchor) = Self::parse_regex(pattern);
+        Self { pattern, anchor }
     }
 
-    fn parse_regex(pattern: &str) -> Vec<PatternElement> {
+    fn parse_regex(pattern: &str) -> (Vec<PatternElement>, Anchor) {
         let mut patterns = Vec::new();
         let mut chars = pattern.chars();
+        let mut anchor = Anchor::None;
 
         let mut next_char = chars.next();
         if let Some(c) = next_char {
-            match c {
-                '^' => {
-                    patterns.push(PatternElement::Start);
-                    next_char = chars.next();
-                }
-                _ => {}
+            if c == '^' {
+                anchor = Anchor::Start;
+                patterns.push(PatternElement::StartAnchor);
+                next_char = chars.next();
             }
         }
 
@@ -99,15 +104,34 @@ impl Regex {
                         patterns.push(PatternElement::PosCharGroup(group_chars));
                     }
                 }
+                '$' if chars.as_str().is_empty() => patterns.push(PatternElement::EndAnchor),
                 c => patterns.push(PatternElement::Literal(c)),
             }
 
             next_char = chars.next();
         }
-        patterns
+        (patterns, anchor)
     }
 
     pub fn matches(&self, mut input: &str) -> bool {
+        match self.anchor {
+            Anchor::None => {
+                let mut result = false;
+                while !result && !input.is_empty() {
+                    (result, input) = self.matches_core(input);
+                }
+
+                result
+            }
+            Anchor::Start => self.matches_core(input).0,
+        }
+    }
+
+    /// Returns (success, remaining input)
+    ///
+    /// The remaining input is the input after the first match so that we could
+    /// later retry matching from that point.
+    fn matches_core<'a>(&self, mut input: &'a str) -> (bool, &'a str) {
         let mut patterns = self.pattern.iter();
 
         // First find the start of first pattern element.
@@ -118,16 +142,16 @@ impl Regex {
 
         if let Some(p) = patterns.next() {
             match p {
-                PatternElement::Start => {}
+                PatternElement::StartAnchor => {}
                 PatternElement::Literal(c) => {
                     let Some(i) = input.find(*c) else {
-                        return false;
+                        return (false, "");
                     };
                     input = input.get(i + 1..).unwrap_or_default();
                 }
                 PatternElement::Digit => {
                     let Some(i) = input.chars().position(|c| c.is_ascii_digit()) else {
-                        return false;
+                        return (false, "");
                     };
                     input = input.get(i + 1..).unwrap_or_default();
                 }
@@ -136,78 +160,86 @@ impl Regex {
                         .chars()
                         .position(|c| c.is_ascii_alphanumeric() || c == '_')
                     else {
-                        return false;
+                        return (false, "");
                     };
                     input = input.get(i + 1..).unwrap_or_default();
                 }
                 PatternElement::PosCharGroup(chars) => {
                     let Some(i) = input.chars().position(|c| chars.contains(&c)) else {
-                        return false;
+                        return (false, "");
                     };
                     input = input.get(i + 1..).unwrap_or_default();
                 }
                 PatternElement::NegCharGroup(chars) => {
                     let Some(i) = input.chars().position(|c| !chars.contains(&c)) else {
-                        return false;
+                        return (false, "");
                     };
                     input = input.get(i + 1..).unwrap_or_default();
+                }
+                PatternElement::EndAnchor => {
+                    // not sure what should be done here
+                    unimplemented!("EndAnchor")
                 }
             }
         }
 
+        let input_after_first = input;
         for p in patterns {
             match p {
-                PatternElement::Start => unreachable!(),
+                PatternElement::StartAnchor => unreachable!("StartAnchor"),
                 PatternElement::Literal(c) => {
                     if !input.starts_with(*c) {
-                        return false;
+                        return (false, input_after_first);
                     }
                     input = input.get(1..).unwrap_or_default();
                 }
                 PatternElement::Digit => {
                     if let Some(c) = input.chars().next() {
                         if !c.is_numeric() {
-                            return false;
+                            return (false, input_after_first);
                         }
                         input = input.get(1..).unwrap_or_default();
                     } else {
-                        return false;
+                        return (false, "");
                     }
                 }
                 PatternElement::Alphanumeric => {
                     if let Some(c) = input.chars().next() {
                         if !(c.is_ascii_alphanumeric() || c == '_') {
-                            return false;
+                            return (false, input_after_first);
                         }
                         input = input.get(1..).unwrap_or_default();
                     } else {
-                        return false;
+                        return (false, "");
                     }
                 }
                 PatternElement::PosCharGroup(chars) => {
                     if let Some(c) = input.chars().next() {
                         if !chars.contains(&c) {
-                            return false;
+                            return (false, input_after_first);
                         }
                         input = input.get(1..).unwrap_or_default();
                     } else {
-                        return false;
+                        return (false, "");
                     }
                 }
                 PatternElement::NegCharGroup(chars) => {
                     if let Some(c) = input.chars().next() {
                         if chars.contains(&c) {
-                            return false;
+                            return (false, input_after_first);
                         }
                         input = input.get(1..).unwrap_or_default();
                     } else {
-                        return false;
+                        return (false, "");
                     }
+                }
+                PatternElement::EndAnchor => {
+                    todo!()
                 }
             }
         }
 
-        true
+        (true, input_after_first)
     }
 }
 
@@ -218,7 +250,8 @@ enum PatternElement {
     Alphanumeric,
     PosCharGroup(Vec<char>),
     NegCharGroup(Vec<char>),
-    Start,
+    StartAnchor,
+    EndAnchor,
 }
 
 #[cfg(test)]
@@ -300,5 +333,17 @@ mod tests {
         dbg!(&regex);
         assert!(regex.matches("abcd"));
         assert!(!regex.matches("gabcd"));
+    }
+
+    #[test]
+    fn test() {
+        let regex = Regex::new(r"abc");
+        dbg!(&regex);
+        assert!(regex.matches("abcd"));
+        assert!(regex.matches("abxxabcd"));
+        let regex = Regex::new(r"\d\da");
+        dbg!(&regex);
+        assert!(regex.matches("1a12a"));
+        assert!(!regex.matches("1a2a3a"));
     }
 }
