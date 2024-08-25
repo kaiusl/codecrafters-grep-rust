@@ -19,6 +19,8 @@ fn main() {
 
     let regex = Regex::new(&pattern);
 
+    dbg!(&pattern, &regex);
+
     // Uncomment this block to pass the first stage
     if regex.matches(&input_line) {
         process::exit(0)
@@ -50,7 +52,10 @@ impl Regex {
                         let el = match c {
                             'd' => PatternElement::Digit,
                             'w' => PatternElement::Alphanumeric,
-                            _ => panic!("Invalid regex: {}", pattern),
+                            c => {
+                                patterns.push(PatternElement::Literal('\\'));
+                                PatternElement::Literal(c)
+                            }
                         };
                         patterns.push(el);
                     } else {
