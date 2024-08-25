@@ -358,6 +358,7 @@ mod tests {
         assert!(regex.matches("abc"));
         assert!(!regex.matches("abcd"));
         assert!(regex.matches("abxxabc"));
+        assert!(regex.matches("abcabcabc"));
     }
 
     #[test]
