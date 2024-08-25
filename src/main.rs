@@ -128,7 +128,10 @@ impl Regex {
                     input = input.get(i + 1..).unwrap_or_default();
                 }
                 PatternElement::NegCharGroup(chars) => {
-                    todo!()
+                    let Some(i) = input.chars().position(|c| !chars.contains(&c)) else {
+                        return false;
+                    };
+                    input = input.get(i + 1..).unwrap_or_default();
                 }
             }
         }
@@ -171,7 +174,16 @@ impl Regex {
                         return false;
                     }
                 }
-                PatternElement::NegCharGroup(_) => todo!(),
+                PatternElement::NegCharGroup(chars) => {
+                    if let Some(c) = input.chars().next() {
+                        if chars.contains(&c) {
+                            return false;
+                        }
+                        input = input.get(1..).unwrap_or_default();
+                    } else {
+                        return false;
+                    }
+                }
             }
         }
 
@@ -248,5 +260,16 @@ mod tests {
         assert!(regex.matches("b"));
         assert!(regex.matches("bh_srt"));
         assert!(!regex.matches("$!"));
+    }
+
+    #[test]
+    fn test_neg_char_group() {
+        let regex = Regex::new(r"[^abc]");
+        dbg!(&regex);
+        assert!(regex.matches("1"));
+        assert!(regex.matches("apple2"));
+        assert!(!regex.matches("b"));
+        assert!(regex.matches("bh_srt"));
+        assert!(regex.matches("$!"));
     }
 }
