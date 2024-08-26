@@ -19,7 +19,7 @@ fn main() {
 
     let regex = Regex::new(&pattern);
 
-    dbg!(&pattern, &regex);
+    //dbg!(&pattern, &regex);
 
     // Uncomment this block to pass the first stage
     if regex.matches(&input_line) {
@@ -70,6 +70,10 @@ impl Regex {
                         let el = match c {
                             'd' => PatternElement::Digit,
                             'w' => PatternElement::Alphanumeric,
+                            c if c.is_ascii_digit() => {
+                                let index = c.to_digit(10).unwrap() as usize;
+                                PatternElement::BackRef(index)
+                            }
                             c => {
                                 patterns.push(PatternElement::Literal('\\'));
                                 PatternElement::Literal(c)
@@ -209,8 +213,10 @@ impl Regex {
         // Thus if we set the input to an input after the first match
         // then the for loop below thus must match pattern at the start of input.
 
+        let mut captures = Vec::new();
+
         if let Some(p) = patterns.next() {
-            let Some((_, end)) = Self::find_match_anywhere(p, input) else {
+            let Some((_, end)) = Self::find_match_anywhere(p, input, &mut captures) else {
                 return (false, "");
             };
 
@@ -222,16 +228,22 @@ impl Regex {
 
         let input_after_first = input;
         for p in patterns {
-            let Some(end) = Self::find_match_at_start(p, input) else {
+            let Some(end) = Self::find_match_at_start(p, input, &mut captures) else {
                 return (false, input_after_first);
             };
             input = input.get(end..).unwrap_or_default();
         }
 
+        dbg!(&captures);
+
         (true, input_after_first)
     }
 
-    fn matches_anywhere(patterns: &[PatternElement], mut input: &str) -> Option<(usize, usize)> {
+    fn matches_anywhere(
+        patterns: &[PatternElement],
+        mut input: &str,
+        captures: &mut Vec<String>,
+    ) -> Option<(usize, usize)> {
         assert!(!matches!(patterns[0], PatternElement::StartAnchor));
         let mut patterns = patterns.iter();
 
@@ -242,7 +254,7 @@ impl Regex {
         // then the for loop below thus must match pattern at the start of input.
         let start;
         if let Some(p) = patterns.next() {
-            let (s, end) = Self::find_match_anywhere(p, input)?;
+            let (s, end) = Self::find_match_anywhere(p, input, captures)?;
             start = s;
             if patterns.as_slice().is_empty() {
                 return Some((start, end));
@@ -254,13 +266,17 @@ impl Regex {
             todo!("Empty pattern");
         }
 
-        Self::match_patterns_at_start(patterns.as_slice(), input).map(|end| (start, end))
+        Self::match_patterns_at_start(patterns.as_slice(), input, captures).map(|end| (start, end))
     }
 
     /// Finds the first match of pattern anywhere in the input and returns the start index and one past the end of match.
     ///
     /// Returns None if there is no match.
-    fn find_match_anywhere(pattern: &PatternElement, input: &str) -> Option<(usize, usize)> {
+    fn find_match_anywhere(
+        pattern: &PatternElement,
+        input: &str,
+        captures: &mut Vec<String>,
+    ) -> Option<(usize, usize)> {
         match pattern {
             PatternElement::StartAnchor => Some((0, 0)),
             PatternElement::Literal(c) => input.find(*c).map(|i| (i, i + 1)),
@@ -286,20 +302,31 @@ impl Regex {
                 unimplemented!("EndAnchor")
             }
             PatternElement::OneOrMore(p) => {
-                let (start, mut end) = Self::find_match_anywhere(p, input)?;
+                let (start, mut end) = Self::find_match_anywhere(p, input, captures)?;
 
-                while let Some(next) = Self::find_match_at_start(p, &input[end..]) {
+                while let Some(next) = Self::find_match_at_start(p, &input[end..], captures) {
                     end += next;
                 }
 
                 Some((start, end))
             }
-            PatternElement::ZeroOrOne(p) => Self::find_match_anywhere(p, input).or(Some((0, 0))),
+            PatternElement::ZeroOrOne(p) => {
+                Self::find_match_anywhere(p, input, captures).or(Some((0, 0)))
+            }
             PatternElement::Wildcard => Some((0, 1)),
             PatternElement::Alternation(first, alt) => {
-                Self::matches_anywhere(first, input).or_else(|| Self::matches_anywhere(alt, input))
+                Self::matches_anywhere(first, input, captures)
+                    .or_else(|| Self::matches_anywhere(alt, input, captures))
             }
-            PatternElement::Group(group) => Self::matches_anywhere(group, input),
+            PatternElement::Group(group) => {
+                let result = Self::matches_anywhere(group, input, captures);
+                if let Some((start, end)) = result {
+                    captures.push(input.get(start..end).unwrap_or_default().to_string());
+                }
+
+                result
+            }
+            PatternElement::BackRef(_) => unimplemented!("BackRef"),
         }
     }
 
@@ -307,7 +334,11 @@ impl Regex {
     /// (or alternatively an index one past the match).
     ///
     /// Returns `None` if there is no match.
-    fn find_match_at_start(pattern: &PatternElement, input: &str) -> Option<usize> {
+    fn find_match_at_start(
+        pattern: &PatternElement,
+        input: &str,
+        captures: &mut Vec<String>,
+    ) -> Option<usize> {
         match pattern {
             PatternElement::StartAnchor => Some(0),
             PatternElement::Literal(c) if input.starts_with(*c) => Some(1),
@@ -365,31 +396,56 @@ impl Regex {
                 }
             }
             PatternElement::OneOrMore(p) => {
-                let mut end = Self::find_match_at_start(p, input)?;
+                let mut end = Self::find_match_at_start(p, input, captures)?;
 
-                while let Some(next) = Self::find_match_at_start(p, &input[end..]) {
+                while let Some(next) = Self::find_match_at_start(p, &input[end..], captures) {
                     end += next;
                 }
 
                 Some(end)
             }
-            PatternElement::ZeroOrOne(p) => Self::find_match_at_start(p, input).or(Some(0)),
+            PatternElement::ZeroOrOne(p) => {
+                Self::find_match_at_start(p, input, captures).or(Some(0))
+            }
             PatternElement::Wildcard => Some(1),
-            PatternElement::Alternation(first, alt) => Self::match_patterns_at_start(first, input)
-                .or_else(|| Self::match_patterns_at_start(alt, input)),
-            PatternElement::Group(patterns) => Self::match_patterns_at_start(patterns, input),
+            PatternElement::Alternation(first, alt) => {
+                Self::match_patterns_at_start(first, input, captures)
+                    .or_else(|| Self::match_patterns_at_start(alt, input, captures))
+            }
+            PatternElement::Group(patterns) => {
+                let result = Self::match_patterns_at_start(patterns, input, captures);
+                if let Some(end) = result {
+                    captures.push(input.get(..end).unwrap_or_default().to_string());
+                }
+
+                result
+            }
+            PatternElement::BackRef(i) => {
+                assert!(*i > 0);
+                let capture = &captures[*i - 1];
+                if input.starts_with(capture) {
+                    Some(capture.len())
+                } else {
+                    None
+                }
+
+            }
         }
     }
 
-    fn match_patterns_at_start(patterns: &[PatternElement], mut input: &str) -> Option<usize> {
+    fn match_patterns_at_start(
+        patterns: &[PatternElement],
+        mut input: &str,
+        captures: &mut Vec<String>,
+    ) -> Option<usize> {
         let mut patterns = patterns.iter();
         let Some(next_pattern) = patterns.next() else {
             unimplemented!("Empty pattern in group");
         };
-        let mut end = Self::find_match_at_start(next_pattern, input)?;
+        let mut end = Self::find_match_at_start(next_pattern, input, captures)?;
 
         for p in patterns {
-            let next_end = Self::find_match_at_start(p, input)?;
+            let next_end = Self::find_match_at_start(p, input, captures)?;
             input = input.get(next_end..).unwrap_or_default();
             end += next_end;
         }
@@ -413,6 +469,7 @@ enum PatternElement {
     Wildcard,
     Group(Vec<PatternElement>),
     Alternation(Vec<PatternElement>, Vec<PatternElement>),
+    BackRef(usize),
 }
 
 #[cfg(test)]
@@ -620,5 +677,30 @@ mod tests {
         assert!(regex.matches("aaddgg"));
         assert!(!regex.matches("aaff"));
         assert!(!regex.matches("aaffgg"));
+    }
+
+    #[test]
+    fn test_back_ref() {
+        let regex = Regex::new(r"(cat) and \1");
+        dbg!(&regex);
+        assert!(regex.matches("cat and cat"));
+        assert!(!regex.matches("cat and dog"));
+
+        let regex = Regex::new(r"(\w+) and \1");
+        dbg!(&regex);
+        assert!(regex.matches("cat and cat"));
+        assert!(regex.matches("dog and dog"));
+        assert!(!regex.matches("cat and dog"));
+
+        let regex = Regex::new(r"(cat) and (\1) and (\2)");
+        dbg!(&regex);
+        assert!(regex.matches("cat and cat and cat"));
+        assert!(!regex.matches("cat and cat and dog"));
+
+
+        let regex = Regex::new(r"(\d+) (\w+) squares and \1 \2 circles");
+        dbg!(&regex);
+        assert!(regex.matches("3 red squares and 3 red circles"));
+        assert!(!regex.matches("3 red squares and 4 red circles"));
     }
 }
