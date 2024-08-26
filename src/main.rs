@@ -114,6 +114,7 @@ impl Regex {
                     let last = patterns.remove(patterns.len() - 1);
                     patterns.push(PatternElement::ZeroOrOne(Box::new(last)));
                 }
+                '.' => patterns.push(PatternElement::Wildcard),
                 '$' if chars.as_str().is_empty() => patterns.push(PatternElement::EndAnchor),
                 c => patterns.push(PatternElement::Literal(c)),
             }
@@ -208,9 +209,8 @@ impl Regex {
 
                 Some((start, end))
             }
-            PatternElement::ZeroOrOne(p) => {
-                Self::find_match_anywhere(p, input).or(Some((0, 0)))
-            }
+            PatternElement::ZeroOrOne(p) => Self::find_match_anywhere(p, input).or(Some((0, 0))),
+            PatternElement::Wildcard => Some((0, 1)),
         }
     }
 
@@ -284,6 +284,7 @@ impl Regex {
                 Some(end)
             }
             PatternElement::ZeroOrOne(p) => Self::find_match_at_start(p, input).or(Some(0)),
+            PatternElement::Wildcard => Some(1),
         }
     }
 }
@@ -299,6 +300,7 @@ enum PatternElement {
     EndAnchor,
     OneOrMore(Box<PatternElement>),
     ZeroOrOne(Box<PatternElement>),
+    Wildcard,
 }
 
 #[cfg(test)]
@@ -415,13 +417,13 @@ mod tests {
 
     #[test]
     fn test_one_or_more() {
-        let regex = Regex::new(r"ca+ts$");
+        let regex = Regex::new(r"ca+ts");
         dbg!(&regex);
         assert!(regex.matches("cats"));
         assert!(regex.matches("caats"));
         assert!(!regex.matches("cts"));
 
-        let regex = Regex::new(r"ca+t\d+s$");
+        let regex = Regex::new(r"ca+t\d+s");
         dbg!(&regex);
         assert!(regex.matches("cat1s"));
         assert!(regex.matches("caat12354s"));
@@ -430,10 +432,19 @@ mod tests {
 
     #[test]
     fn test_zero_or_one() {
-        let regex = Regex::new(r"dogs?$");
+        let regex = Regex::new(r"dogs?");
         dbg!(&regex);
         assert!(regex.matches("dogs"));
         assert!(regex.matches("dog"));
         assert!(!regex.matches("dos"));
+    }
+
+    #[test]
+    fn test_wildcard() {
+        let regex = Regex::new(r"d.g");
+        dbg!(&regex);
+        assert!(regex.matches("dogs"));
+        assert!(regex.matches("dgg"));
+        assert!(!regex.matches("dys"));
     }
 }
