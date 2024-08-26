@@ -106,17 +106,75 @@ impl Regex {
                         patterns.push(PatternElement::PosCharGroup(group_chars));
                     }
                 }
+                '(' if chars.as_str().contains(')') => {
+                    let group_end = chars.clone().position(|c| c == ')').unwrap();
+                    let (group, _) = Self::parse_regex(&chars.as_str()[..group_end]);
+                    assert_eq!(chars.nth(group_end), Some(')'));
+
+                    patterns.push(PatternElement::Group(group));
+                }
                 '+' if !patterns.is_empty() => {
                     let last = patterns.remove(patterns.len() - 1);
-                    patterns.push(PatternElement::OneOrMore(Box::new(last)));
+                    match last {
+                        PatternElement::Str(mut s) => {
+                            assert!(!s.is_empty());
+                            let last_char = s.remove(s.len() - 1);
+                            if !s.is_empty() {
+                                patterns.push(PatternElement::Str(s));
+                                patterns.push(PatternElement::OneOrMore(Box::new(
+                                    PatternElement::Literal(last_char),
+                                )));
+                            }
+                        }
+                        _ => {
+                            patterns.push(PatternElement::OneOrMore(Box::new(last)));
+                        }
+                    }
                 }
                 '?' if !patterns.is_empty() => {
                     let last = patterns.remove(patterns.len() - 1);
-                    patterns.push(PatternElement::ZeroOrOne(Box::new(last)));
+                    match last {
+                        PatternElement::Str(mut s) => {
+                            assert!(!s.is_empty());
+                            let last_char = s.remove(s.len() - 1);
+                            if !s.is_empty() {
+                                patterns.push(PatternElement::Str(s));
+                                patterns.push(PatternElement::ZeroOrOne(Box::new(
+                                    PatternElement::Literal(last_char),
+                                )));
+                            }
+                        }
+                        _ => {
+                            patterns.push(PatternElement::ZeroOrOne(Box::new(last)));
+                        }
+                    }
                 }
                 '.' => patterns.push(PatternElement::Wildcard),
+                '|' => {
+                    let lhs = std::mem::take(&mut patterns);
+                    let (rhs, _) = Self::parse_regex(chars.as_str());
+
+                    patterns.push(PatternElement::Alternation(lhs, rhs));
+                    return (patterns, anchor);
+                }
                 '$' if chars.as_str().is_empty() => patterns.push(PatternElement::EndAnchor),
-                c => patterns.push(PatternElement::Literal(c)),
+                c if patterns.is_empty() => patterns.push(PatternElement::Literal(c)),
+                c => match patterns.remove(patterns.len() - 1) {
+                    PatternElement::Str(mut s) => {
+                        s.push(c);
+                        patterns.push(PatternElement::Str(s));
+                    }
+                    PatternElement::Literal(prev_c) => {
+                        let mut s = String::with_capacity(2);
+                        s.push(prev_c);
+                        s.push(c);
+                        patterns.push(PatternElement::Str(s));
+                    }
+                    prev => {
+                        patterns.push(prev);
+                        patterns.push(PatternElement::Literal(c));
+                    }
+                },
             }
 
             next_char = chars.next();
@@ -173,6 +231,32 @@ impl Regex {
         (true, input_after_first)
     }
 
+    fn matches_anywhere(patterns: &[PatternElement], mut input: &str) -> Option<(usize, usize)> {
+        assert!(!matches!(patterns[0], PatternElement::StartAnchor));
+        let mut patterns = patterns.iter();
+
+        // First find the start of first pattern element.
+        // This can be anywhere in the input and is thus special case.
+        // All following pattern elements must directly follow the first one.
+        // Thus if we set the input to an input after the first match
+        // then the for loop below thus must match pattern at the start of input.
+        let start;
+        if let Some(p) = patterns.next() {
+            let (s, end) = Self::find_match_anywhere(p, input)?;
+            start = s;
+            if patterns.as_slice().is_empty() {
+                return Some((start, end));
+            }
+
+            input = input.get(end..).unwrap_or_default();
+        } else {
+            // empty pattern
+            todo!("Empty pattern");
+        }
+
+        Self::match_patterns_at_start(patterns.as_slice(), input).map(|end| (start, end))
+    }
+
     /// Finds the first match of pattern anywhere in the input and returns the start index and one past the end of match.
     ///
     /// Returns None if there is no match.
@@ -180,6 +264,7 @@ impl Regex {
         match pattern {
             PatternElement::StartAnchor => Some((0, 0)),
             PatternElement::Literal(c) => input.find(*c).map(|i| (i, i + 1)),
+            PatternElement::Str(s) => input.find(s).map(|i| (i, i + s.len())),
             PatternElement::Digit => input
                 .chars()
                 .position(|c| c.is_ascii_digit())
@@ -211,6 +296,10 @@ impl Regex {
             }
             PatternElement::ZeroOrOne(p) => Self::find_match_anywhere(p, input).or(Some((0, 0))),
             PatternElement::Wildcard => Some((0, 1)),
+            PatternElement::Alternation(first, alt) => {
+                Self::matches_anywhere(first, input).or_else(|| Self::matches_anywhere(alt, input))
+            }
+            PatternElement::Group(group) => Self::matches_anywhere(group, input),
         }
     }
 
@@ -222,7 +311,8 @@ impl Regex {
         match pattern {
             PatternElement::StartAnchor => Some(0),
             PatternElement::Literal(c) if input.starts_with(*c) => Some(1),
-            PatternElement::Literal(_) => None,
+            PatternElement::Str(s) if input.starts_with(s) => Some(s.len()),
+            PatternElement::Literal(_) | PatternElement::Str(_) => None,
             PatternElement::Digit => {
                 if let Some(c) = input.chars().next() {
                     if !c.is_numeric() {
@@ -285,13 +375,33 @@ impl Regex {
             }
             PatternElement::ZeroOrOne(p) => Self::find_match_at_start(p, input).or(Some(0)),
             PatternElement::Wildcard => Some(1),
+            PatternElement::Alternation(first, alt) => Self::match_patterns_at_start(first, input)
+                .or_else(|| Self::match_patterns_at_start(alt, input)),
+            PatternElement::Group(patterns) => Self::match_patterns_at_start(patterns, input),
         }
+    }
+
+    fn match_patterns_at_start(patterns: &[PatternElement], mut input: &str) -> Option<usize> {
+        let mut patterns = patterns.iter();
+        let Some(next_pattern) = patterns.next() else {
+            unimplemented!("Empty pattern in group");
+        };
+        let mut end = Self::find_match_at_start(next_pattern, input)?;
+
+        for p in patterns {
+            let next_end = Self::find_match_at_start(p, input)?;
+            input = input.get(next_end..).unwrap_or_default();
+            end += next_end;
+        }
+
+        Some(end)
     }
 }
 
 #[derive(Debug)]
 enum PatternElement {
     Literal(char),
+    Str(String),
     Digit,
     Alphanumeric,
     PosCharGroup(Vec<char>),
@@ -301,6 +411,8 @@ enum PatternElement {
     OneOrMore(Box<PatternElement>),
     ZeroOrOne(Box<PatternElement>),
     Wildcard,
+    Group(Vec<PatternElement>),
+    Alternation(Vec<PatternElement>, Vec<PatternElement>),
 }
 
 #[cfg(test)]
@@ -446,5 +558,67 @@ mod tests {
         assert!(regex.matches("dogs"));
         assert!(regex.matches("dgg"));
         assert!(!regex.matches("dys"));
+    }
+
+    #[test]
+    fn test_group() {
+        let regex = Regex::new(r"a(bg)");
+        dbg!(&regex);
+        assert!(regex.matches("abg"));
+        assert!(!regex.matches("dgg"));
+        assert!(!regex.matches("dys"));
+    }
+
+    #[test]
+    fn test_alteration_single() {
+        let regex = Regex::new(r"a|b");
+        dbg!(&regex);
+        assert!(regex.matches("a"));
+        assert!(regex.matches("b"));
+        assert!(regex.matches("ag"));
+        assert!(regex.matches("hbf"));
+        assert!(!regex.matches("dys"));
+
+        let regex = Regex::new(r"a|b|c");
+        dbg!(&regex);
+        assert!(regex.matches("a"));
+        assert!(regex.matches("b"));
+        assert!(regex.matches("c"));
+        assert!(!regex.matches("dys"));
+    }
+
+    #[test]
+    fn test_alteration_multi() {
+        let regex = Regex::new(r"cat|dog");
+        dbg!(&regex);
+        assert!(regex.matches("cat"));
+        assert!(regex.matches("dog"));
+        assert!(!regex.matches("caog"));
+
+        let regex = Regex::new(r"ae|br|ct");
+        dbg!(&regex);
+        assert!(regex.matches("ae"));
+        assert!(regex.matches("br"));
+        assert!(regex.matches("ct"));
+        assert!(regex.matches("aebgctsf"));
+    }
+
+    #[test]
+    fn test_alteration_w_groups() {
+        let regex = Regex::new(r"a(fs|b)");
+        dbg!(&regex);
+        assert!(regex.matches("afs"));
+        assert!(regex.matches("ab"));
+        assert!(!regex.matches("a"));
+        assert!(!regex.matches("fs"));
+        assert!(!regex.matches("b"));
+        assert!(!regex.matches("dys"));
+
+        let regex = Regex::new(r"aa(bb|cc|dd)(ee|ff|gg)");
+        dbg!(&regex);
+        assert!(regex.matches("aaccee"));
+        assert!(regex.matches("aaddgg"));
+        assert!(!regex.matches("aaff"));
+        assert!(!regex.matches("aaffgg"));
     }
 }
