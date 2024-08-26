@@ -59,6 +59,8 @@ impl Regex {
                 patterns.push(PatternElement::StartAnchor);
                 next_char = chars.next();
             }
+        } else {
+            todo!("Empty pattern");
         }
 
         while let Some(c) = next_char {
@@ -141,6 +143,54 @@ impl Regex {
         // then the for loop below thus must match pattern at the start of input.
 
         if let Some(p) = patterns.next() {
+            let Some((_, end)) = Self::find_match_anywhere(p, input) else {
+                return (false, "");
+            };
+
+            input = input.get(end..).unwrap_or_default();
+        } else {
+            // empty pattern
+            todo!("Empty pattern");
+        }
+
+        let input_after_first = input;
+        for p in patterns {
+            let Some(end) = Self::find_match_at_start(p, input) else {
+                return (false, input_after_first);
+            };
+            input = input.get(end..).unwrap_or_default();
+        }
+
+        (true, input_after_first)
+    }
+
+    /// Finds the first match of pattern anywhere in the input and returns the start index and one past the end of match.
+    /// 
+    /// Returns None if there is no match.
+    fn find_match_anywhere(pattern: &PatternElement, input: &str) -> Option<(usize, usize)> {
+        match pattern {
+            PatternElement::StartAnchor => Some((0, 0)),
+            PatternElement::Literal(c) => input.find(*c).map(|i| (i, i + 1)),
+            PatternElement::Digit => input
+                .chars()
+                .position(|c| c.is_ascii_digit())
+                .map(|i| (i, i + 1)),
+            PatternElement::Alphanumeric => input
+                .chars()
+                .position(|c| c.is_ascii_alphanumeric() || c == '_')
+                .map(|i| (i, i + 1)),
+            PatternElement::PosCharGroup(chars) => input
+                .chars()
+                .position(|c| chars.contains(&c))
+                .map(|i| (i, i + 1)),
+            PatternElement::NegCharGroup(chars) => input
+                .chars()
+                .position(|c| !chars.contains(&c))
+                .map(|i| (i, i + 1)),
+            PatternElement::EndAnchor => {
+                // not sure what should be done here
+                unimplemented!("EndAnchor")
+            }
             match p {
                 PatternElement::StartAnchor => {}
                 PatternElement::Literal(c) => {
@@ -239,11 +289,75 @@ impl Regex {
                     } else {
                         return (false, input_after_first);
                     }
+        }
+    }
+
+    /// Matches the `pattern` at the start of `input` and returns the length of the match 
+    /// (or alternatively an index one past the match).
+    /// 
+    /// Returns `None` if there is no match.
+    fn find_match_at_start(pattern: &PatternElement, input: &str) -> Option<usize> {
+        match pattern {
+            PatternElement::StartAnchor => Some(0),
+            PatternElement::Literal(c) if input.starts_with(*c) => Some(1),
+            PatternElement::Literal(_) => None,
+            PatternElement::Digit => {
+                if let Some(c) = input.chars().next() {
+                    if !c.is_numeric() {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+
+                Some(1)
+            }
+            PatternElement::Alphanumeric => {
+                if let Some(c) = input.chars().next() {
+                    if !(c.is_ascii_alphanumeric() || c == '_') {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+
+                Some(1)
+            }
+            PatternElement::PosCharGroup(chars) => {
+                if let Some(c) = input.chars().next() {
+                    if !chars.contains(&c) {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+
+                Some(1)
+            }
+            PatternElement::NegCharGroup(chars) => {
+                if let Some(c) = input.chars().next() {
+                    if chars.contains(&c) {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+
+                Some(1)
+            }
+            PatternElement::EndAnchor => {
+                if input.chars().next().is_none() {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
                 }
             }
         }
 
         (true, input_after_first)
+        }
     }
 }
 
