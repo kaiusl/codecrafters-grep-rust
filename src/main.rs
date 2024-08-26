@@ -106,6 +106,10 @@ impl Regex {
                         patterns.push(PatternElement::PosCharGroup(group_chars));
                     }
                 }
+                '+' if !patterns.is_empty() => {
+                    let last = patterns.remove(patterns.len() - 1);
+                    patterns.push(PatternElement::OneOrMore(Box::new(last)));
+                }
                 '$' if chars.as_str().is_empty() => patterns.push(PatternElement::EndAnchor),
                 c => patterns.push(PatternElement::Literal(c)),
             }
@@ -191,104 +195,15 @@ impl Regex {
                 // not sure what should be done here
                 unimplemented!("EndAnchor")
             }
-            match p {
-                PatternElement::StartAnchor => {}
-                PatternElement::Literal(c) => {
-                    let Some(i) = input.find(*c) else {
-                        return (false, "");
-                    };
-                    input = input.get(i + 1..).unwrap_or_default();
-                }
-                PatternElement::Digit => {
-                    let Some(i) = input.chars().position(|c| c.is_ascii_digit()) else {
-                        return (false, "");
-                    };
-                    input = input.get(i + 1..).unwrap_or_default();
-                }
-                PatternElement::Alphanumeric => {
-                    let Some(i) = input
-                        .chars()
-                        .position(|c| c.is_ascii_alphanumeric() || c == '_')
-                    else {
-                        return (false, "");
-                    };
-                    input = input.get(i + 1..).unwrap_or_default();
-                }
-                PatternElement::PosCharGroup(chars) => {
-                    let Some(i) = input.chars().position(|c| chars.contains(&c)) else {
-                        return (false, "");
-                    };
-                    input = input.get(i + 1..).unwrap_or_default();
-                }
-                PatternElement::NegCharGroup(chars) => {
-                    let Some(i) = input.chars().position(|c| !chars.contains(&c)) else {
-                        return (false, "");
-                    };
-                    input = input.get(i + 1..).unwrap_or_default();
-                }
-                PatternElement::EndAnchor => {
-                    // not sure what should be done here
-                    unimplemented!("EndAnchor")
-                }
-            }
-        }
+            PatternElement::OneOrMore(p) => {
+                let (start, mut end) = Self::find_match_anywhere(p, input)?;
 
-        let input_after_first = input;
-        for p in patterns {
-            match p {
-                PatternElement::StartAnchor => unreachable!("StartAnchor"),
-                PatternElement::Literal(c) => {
-                    if !input.starts_with(*c) {
-                        return (false, input_after_first);
-                    }
-                    input = input.get(1..).unwrap_or_default();
+                while let Some(next) = Self::find_match_at_start(p, &input[end..]) {
+                    end += next;
                 }
-                PatternElement::Digit => {
-                    if let Some(c) = input.chars().next() {
-                        if !c.is_numeric() {
-                            return (false, input_after_first);
-                        }
-                        input = input.get(1..).unwrap_or_default();
-                    } else {
-                        return (false, "");
-                    }
-                }
-                PatternElement::Alphanumeric => {
-                    if let Some(c) = input.chars().next() {
-                        if !(c.is_ascii_alphanumeric() || c == '_') {
-                            return (false, input_after_first);
-                        }
-                        input = input.get(1..).unwrap_or_default();
-                    } else {
-                        return (false, "");
-                    }
-                }
-                PatternElement::PosCharGroup(chars) => {
-                    if let Some(c) = input.chars().next() {
-                        if !chars.contains(&c) {
-                            return (false, input_after_first);
-                        }
-                        input = input.get(1..).unwrap_or_default();
-                    } else {
-                        return (false, "");
-                    }
-                }
-                PatternElement::NegCharGroup(chars) => {
-                    if let Some(c) = input.chars().next() {
-                        if chars.contains(&c) {
-                            return (false, input_after_first);
-                        }
-                        input = input.get(1..).unwrap_or_default();
-                    } else {
-                        return (false, "");
-                    }
-                }
-                PatternElement::EndAnchor => {
-                    if input.chars().next().is_none() {
-                        return (true, "");
-                    } else {
-                        return (false, input_after_first);
-                    }
+
+                Some((start, end))
+            }
         }
     }
 
@@ -352,11 +267,15 @@ impl Regex {
                     None
                 }
             }
-                }
-            }
-        }
+            PatternElement::OneOrMore(p) => {
+                let mut end = Self::find_match_at_start(p, input)?;
 
-        (true, input_after_first)
+                while let Some(next) = Self::find_match_at_start(p, &input[end..]) {
+                    end += next;
+                }
+
+                Some(end)
+            }
         }
     }
 }
@@ -370,6 +289,7 @@ enum PatternElement {
     NegCharGroup(Vec<char>),
     StartAnchor,
     EndAnchor,
+    OneOrMore(Box<PatternElement>),
 }
 
 #[cfg(test)]
@@ -482,5 +402,20 @@ mod tests {
         assert!(regex.matches("abc"));
         assert!(!regex.matches("abcd"));
         assert!(!regex.matches("abxxabc"));
+    }
+
+    #[test]
+    fn test_one_or_more() {
+        let regex = Regex::new(r"ca+ts$");
+        dbg!(&regex);
+        assert!(regex.matches("cats"));
+        assert!(regex.matches("caats"));
+        assert!(!regex.matches("cts"));
+
+        let regex = Regex::new(r"ca+t\d+s$");
+        dbg!(&regex);
+        assert!(regex.matches("cat1s"));
+        assert!(regex.matches("caat12354s"));
+        assert!(!regex.matches("ct16513s"));
     }
 }
