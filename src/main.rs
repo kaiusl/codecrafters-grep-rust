@@ -43,11 +43,11 @@ enum Anchor {
 
 impl Regex {
     pub fn new(pattern: &str) -> Self {
-        let (pattern, anchor) = Self::parse_regex(pattern);
+        let (pattern, anchor, _) = Self::parse_regex(pattern, false);
         Self { pattern, anchor }
     }
 
-    fn parse_regex(pattern: &str) -> (Vec<PatternElement>, Anchor) {
+    fn parse_regex(pattern: &str, open_group: bool) -> (Vec<PatternElement>, Anchor, &str) {
         let mut patterns = Vec::new();
         let mut chars = pattern.chars();
         let mut anchor = Anchor::None;
@@ -111,11 +111,13 @@ impl Regex {
                     }
                 }
                 '(' if chars.as_str().contains(')') => {
-                    let group_end = chars.clone().position(|c| c == ')').unwrap();
-                    let (group, _) = Self::parse_regex(&chars.as_str()[..group_end]);
-                    assert_eq!(chars.nth(group_end), Some(')'));
+                    let (group, _, remainder) = Self::parse_regex(&chars.as_str(), true);
+                    chars = remainder.chars();
 
                     patterns.push(PatternElement::Group(group));
+                }
+                ')' if open_group => {
+                    return (patterns, anchor, chars.as_str());
                 }
                 '+' if !patterns.is_empty() => {
                     let last = patterns.remove(patterns.len() - 1);
@@ -156,10 +158,10 @@ impl Regex {
                 '.' => patterns.push(PatternElement::Wildcard),
                 '|' => {
                     let lhs = std::mem::take(&mut patterns);
-                    let (rhs, _) = Self::parse_regex(chars.as_str());
+                    let (rhs, _, remainder) = Self::parse_regex(chars.as_str(), open_group);
 
                     patterns.push(PatternElement::Alternation(lhs, rhs));
-                    return (patterns, anchor);
+                    return (patterns, anchor, remainder);
                 }
                 '$' if chars.as_str().is_empty() => patterns.push(PatternElement::EndAnchor),
                 c if patterns.is_empty() => patterns.push(PatternElement::Literal(c)),
@@ -183,7 +185,7 @@ impl Regex {
 
             next_char = chars.next();
         }
-        (patterns, anchor)
+        (patterns, anchor, chars.as_str())
     }
 
     pub fn matches(&self, mut input: &str) -> bool {
@@ -705,5 +707,12 @@ mod tests {
         let regex = Regex::new(r"(\w\w\w\w \d\d\d) is doing \1 times");
         dbg!(&regex);
         assert!(regex.matches("grep 101 is doing grep 101 times"));
+    }
+
+    #[test]
+    fn test_nested_groups() {
+        let regex = Regex::new(r"(a (b\w) \d)+");
+        dbg!(&regex);
+        assert!(regex.matches("a ba 1"));
     }
 }
