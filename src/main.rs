@@ -110,6 +110,10 @@ impl Regex {
                     let last = patterns.remove(patterns.len() - 1);
                     patterns.push(PatternElement::OneOrMore(Box::new(last)));
                 }
+                '?' if !patterns.is_empty() => {
+                    let last = patterns.remove(patterns.len() - 1);
+                    patterns.push(PatternElement::ZeroOrOne(Box::new(last)));
+                }
                 '$' if chars.as_str().is_empty() => patterns.push(PatternElement::EndAnchor),
                 c => patterns.push(PatternElement::Literal(c)),
             }
@@ -169,7 +173,7 @@ impl Regex {
     }
 
     /// Finds the first match of pattern anywhere in the input and returns the start index and one past the end of match.
-    /// 
+    ///
     /// Returns None if there is no match.
     fn find_match_anywhere(pattern: &PatternElement, input: &str) -> Option<(usize, usize)> {
         match pattern {
@@ -204,12 +208,15 @@ impl Regex {
 
                 Some((start, end))
             }
+            PatternElement::ZeroOrOne(p) => {
+                Self::find_match_anywhere(p, input).or(Some((0, 0)))
+            }
         }
     }
 
-    /// Matches the `pattern` at the start of `input` and returns the length of the match 
+    /// Matches the `pattern` at the start of `input` and returns the length of the match
     /// (or alternatively an index one past the match).
-    /// 
+    ///
     /// Returns `None` if there is no match.
     fn find_match_at_start(pattern: &PatternElement, input: &str) -> Option<usize> {
         match pattern {
@@ -276,6 +283,7 @@ impl Regex {
 
                 Some(end)
             }
+            PatternElement::ZeroOrOne(p) => Self::find_match_at_start(p, input).or(Some(0)),
         }
     }
 }
@@ -290,6 +298,7 @@ enum PatternElement {
     StartAnchor,
     EndAnchor,
     OneOrMore(Box<PatternElement>),
+    ZeroOrOne(Box<PatternElement>),
 }
 
 #[cfg(test)]
@@ -417,5 +426,14 @@ mod tests {
         assert!(regex.matches("cat1s"));
         assert!(regex.matches("caat12354s"));
         assert!(!regex.matches("ct16513s"));
+    }
+
+    #[test]
+    fn test_zero_or_one() {
+        let regex = Regex::new(r"dogs?$");
+        dbg!(&regex);
+        assert!(regex.matches("dogs"));
+        assert!(regex.matches("dog"));
+        assert!(!regex.matches("dos"));
     }
 }
