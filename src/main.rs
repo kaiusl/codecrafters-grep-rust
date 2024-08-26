@@ -1,6 +1,7 @@
 use std::env;
 use std::io;
 use std::process;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Usage: echo <input_text> | your_program.sh -E <pattern>
 fn main() {
@@ -111,7 +112,7 @@ impl Regex {
                     }
                 }
                 '(' if chars.as_str().contains(')') => {
-                    let (group, _, remainder) = Self::parse_regex(&chars.as_str(), true);
+                    let (group, _, remainder) = Self::parse_regex(chars.as_str(), true);
                     chars = remainder.chars();
 
                     patterns.push(PatternElement::Group(group));
@@ -322,9 +323,11 @@ impl Regex {
                     .or_else(|| Self::matches_anywhere(alt, input, captures))
             }
             PatternElement::Group(group) => {
+                let index = captures.len();
+                captures.push(String::new());
                 let result = Self::matches_anywhere(group, input, captures);
                 if let Some((start, end)) = result {
-                    captures.push(input.get(start..end).unwrap_or_default().to_string());
+                    captures[index] = input.get(start..end).unwrap_or_default().to_string();
                 }
 
                 result
@@ -416,9 +419,11 @@ impl Regex {
                     .or_else(|| Self::match_patterns_at_start(alt, input, captures))
             }
             PatternElement::Group(patterns) => {
+                let index = captures.len();
+                captures.push(String::new());
                 let result = Self::match_patterns_at_start(patterns, input, captures);
                 if let Some(end) = result {
-                    captures.push(input.get(..end).unwrap_or_default().to_string());
+                    captures[index] = input.get(..end).unwrap_or_default().to_string();
                 }
 
                 result
@@ -711,8 +716,15 @@ mod tests {
 
     #[test]
     fn test_nested_groups() {
-        let regex = Regex::new(r"(a (b\w) \d)+");
+        let regex = Regex::new(r"(a (b\w (a)) (\d b))+");
         dbg!(&regex);
-        assert!(regex.matches("a ba 1"));
+        assert!(regex.matches("a ba a 1 b"));
+    }
+
+    #[test]
+    fn test_nested_back_refs() {
+        let regex = Regex::new(r"('(cat) and \2') is the same as \1");
+        dbg!(&regex);
+        assert!(regex.matches("'cat and cat' is the same as 'cat and cat'"));
     }
 }
