@@ -253,20 +253,21 @@ impl Regex {
         // Thus if we set the input to an input after the first match
         // then the for loop below thus must match pattern at the start of input.
         let start;
+        let end_first;
         if let Some(p) = patterns.next() {
-            let (s, end) = Self::find_match_anywhere(p, input, captures)?;
-            start = s;
+            (start, end_first) = Self::find_match_anywhere(p, input, captures)?;
             if patterns.as_slice().is_empty() {
-                return Some((start, end));
+                return Some((start, end_first));
             }
 
-            input = input.get(end..).unwrap_or_default();
+            input = input.get(end_first..).unwrap_or_default();
         } else {
             // empty pattern
             todo!("Empty pattern");
         }
 
-        Self::match_patterns_at_start(patterns.as_slice(), input, captures).map(|end| (start, end))
+        Self::match_patterns_at_start(patterns.as_slice(), input, captures)
+            .map(|end| (start, end_first + end))
     }
 
     /// Finds the first match of pattern anywhere in the input and returns the start index and one past the end of match.
@@ -428,7 +429,6 @@ impl Regex {
                 } else {
                     None
                 }
-
             }
         }
     }
@@ -438,11 +438,8 @@ impl Regex {
         mut input: &str,
         captures: &mut Vec<String>,
     ) -> Option<usize> {
-        let mut patterns = patterns.iter();
-        let Some(next_pattern) = patterns.next() else {
-            unimplemented!("Empty pattern in group");
-        };
-        let mut end = Self::find_match_at_start(next_pattern, input, captures)?;
+        let patterns = patterns.iter();
+        let mut end = 0;
 
         for p in patterns {
             let next_end = Self::find_match_at_start(p, input, captures)?;
@@ -697,10 +694,16 @@ mod tests {
         assert!(regex.matches("cat and cat and cat"));
         assert!(!regex.matches("cat and cat and dog"));
 
-
         let regex = Regex::new(r"(\d+) (\w+) squares and \1 \2 circles");
         dbg!(&regex);
         assert!(regex.matches("3 red squares and 3 red circles"));
         assert!(!regex.matches("3 red squares and 4 red circles"));
+    }
+
+    #[test]
+    fn test_back_ref_issue() {
+        let regex = Regex::new(r"(\w\w\w\w \d\d\d) is doing \1 times");
+        dbg!(&regex);
+        assert!(regex.matches("grep 101 is doing grep 101 times"));
     }
 }
