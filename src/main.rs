@@ -1,7 +1,6 @@
 use std::env;
 use std::io;
 use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Usage: echo <input_text> | your_program.sh -E <pattern>
 fn main() {
@@ -57,7 +56,6 @@ impl Regex {
         if let Some(c) = next_char {
             if c == '^' {
                 anchor = Anchor::Start;
-                patterns.push(PatternElement::StartAnchor);
                 next_char = chars.next();
             }
         } else {
@@ -115,7 +113,9 @@ impl Regex {
                     let (group, _, remainder) = Self::parse_regex(chars.as_str(), true);
                     chars = remainder.chars();
 
-                    patterns.push(PatternElement::Group(group));
+                    patterns.push(PatternElement::GroupStart);
+                    patterns.extend(group);
+                    patterns.push(PatternElement::GroupEnd);
                 }
                 ')' if open_group => {
                     return (patterns, anchor, chars.as_str());
@@ -128,13 +128,15 @@ impl Regex {
                             let last_char = s.remove(s.len() - 1);
                             if !s.is_empty() {
                                 patterns.push(PatternElement::Str(s));
-                                patterns.push(PatternElement::OneOrMore(Box::new(
-                                    PatternElement::Literal(last_char),
-                                )));
+                                patterns.push(PatternElement::Quantifier(
+                                    Box::new(PatternElement::Literal(last_char)),
+                                    1,
+                                    None,
+                                ));
                             }
                         }
                         _ => {
-                            patterns.push(PatternElement::OneOrMore(Box::new(last)));
+                            patterns.push(PatternElement::Quantifier(Box::new(last), 1, None));
                         }
                     }
                 }
@@ -146,13 +148,15 @@ impl Regex {
                             let last_char = s.remove(s.len() - 1);
                             if !s.is_empty() {
                                 patterns.push(PatternElement::Str(s));
-                                patterns.push(PatternElement::ZeroOrOne(Box::new(
-                                    PatternElement::Literal(last_char),
-                                )));
+                                patterns.push(PatternElement::Quantifier(
+                                    Box::new(PatternElement::Literal(last_char)),
+                                    0,
+                                    Some(1),
+                                ));
                             }
                         }
                         _ => {
-                            patterns.push(PatternElement::ZeroOrOne(Box::new(last)));
+                            patterns.push(PatternElement::Quantifier(Box::new(last), 0, Some(1)));
                         }
                     }
                 }
@@ -189,272 +193,375 @@ impl Regex {
         (patterns, anchor, chars.as_str())
     }
 
-    pub fn matches(&self, mut input: &str) -> bool {
+    pub fn matcher(&self) -> Matcher<'_> {
+        Matcher::new(&self.pattern)
+    }
+
+    pub fn matches(&self, input: &str) -> bool {
+        let matcher = self.matcher();
+
         match self.anchor {
-            Anchor::None => {
-                let mut result = false;
-                while !result && !input.is_empty() {
-                    (result, input) = self.matches_core(input);
-                }
-
-                result
-            }
-            Anchor::Start => self.matches_core(input).0,
+            Anchor::None => matcher.matches(input),
+            Anchor::Start => matcher.matches_at_start(input, input).is_success(),
         }
     }
+}
 
-    /// Returns (success, remaining input)
+#[derive(Debug)]
+struct Matcher<'a> {
+    patterns: &'a [PatternElement],
+    group_id: usize,
+    open_groups: Vec<(usize, usize)>,
+    captures: Vec<&'a str>,
+}
+
+enum MatchResult<'a> {
+    Success(usize, MatcherState<'a>),
+    Fail(MatcherState<'a>),
+}
+
+impl<'a> MatchResult<'a> {
+    /// Returns `true` if the match result is [`Success`].
     ///
-    /// The remaining input is the input after the first match so that we could
-    /// later retry matching from that point.
-    fn matches_core<'a>(&self, mut input: &'a str) -> (bool, &'a str) {
-        let mut patterns = self.pattern.iter();
-
-        // First find the start of first pattern element.
-        // This can be anywhere in the input and is thus special case.
-        // All following pattern elements must directly follow the first one.
-        // Thus if we set the input to an input after the first match
-        // then the for loop below thus must match pattern at the start of input.
-
-        let mut captures = Vec::new();
-
-        if let Some(p) = patterns.next() {
-            let Some((_, end)) = Self::find_match_anywhere(p, input, &mut captures) else {
-                return (false, "");
-            };
-
-            input = input.get(end..).unwrap_or_default();
-        } else {
-            // empty pattern
-            todo!("Empty pattern");
-        }
-
-        let input_after_first = input;
-        for p in patterns {
-            let Some(end) = Self::find_match_at_start(p, input, &mut captures) else {
-                return (false, input_after_first);
-            };
-            input = input.get(end..).unwrap_or_default();
-        }
-
-        dbg!(&captures);
-
-        (true, input_after_first)
+    /// [`Success`]: MatchResult::Success
+    #[must_use]
+    fn is_success(&self) -> bool {
+        matches!(self, Self::Success(..))
     }
 
-    fn matches_anywhere(
-        patterns: &[PatternElement],
-        mut input: &str,
-        captures: &mut Vec<String>,
-    ) -> Option<(usize, usize)> {
-        assert!(!matches!(patterns[0], PatternElement::StartAnchor));
-        let mut patterns = patterns.iter();
-
-        // First find the start of first pattern element.
-        // This can be anywhere in the input and is thus special case.
-        // All following pattern elements must directly follow the first one.
-        // Thus if we set the input to an input after the first match
-        // then the for loop below thus must match pattern at the start of input.
-        let start;
-        let end_first;
-        if let Some(p) = patterns.next() {
-            (start, end_first) = Self::find_match_anywhere(p, input, captures)?;
-            if patterns.as_slice().is_empty() {
-                return Some((start, end_first));
-            }
-
-            input = input.get(end_first..).unwrap_or_default();
-        } else {
-            // empty pattern
-            todo!("Empty pattern");
-        }
-
-        Self::match_patterns_at_start(patterns.as_slice(), input, captures)
-            .map(|end| (start, end_first + end))
-    }
-
-    /// Finds the first match of pattern anywhere in the input and returns the start index and one past the end of match.
+    /// Returns `true` if the match result is [`Fail`].
     ///
-    /// Returns None if there is no match.
-    fn find_match_anywhere(
-        pattern: &PatternElement,
-        input: &str,
-        captures: &mut Vec<String>,
-    ) -> Option<(usize, usize)> {
-        match pattern {
-            PatternElement::StartAnchor => Some((0, 0)),
-            PatternElement::Literal(c) => input.find(*c).map(|i| (i, i + 1)),
-            PatternElement::Str(s) => input.find(s).map(|i| (i, i + s.len())),
-            PatternElement::Digit => input
-                .chars()
-                .position(|c| c.is_ascii_digit())
-                .map(|i| (i, i + 1)),
-            PatternElement::Alphanumeric => input
-                .chars()
-                .position(|c| c.is_ascii_alphanumeric() || c == '_')
-                .map(|i| (i, i + 1)),
-            PatternElement::PosCharGroup(chars) => input
-                .chars()
-                .position(|c| chars.contains(&c))
-                .map(|i| (i, i + 1)),
-            PatternElement::NegCharGroup(chars) => input
-                .chars()
-                .position(|c| !chars.contains(&c))
-                .map(|i| (i, i + 1)),
-            PatternElement::EndAnchor => {
-                // not sure what should be done here
-                unimplemented!("EndAnchor")
-            }
-            PatternElement::OneOrMore(p) => {
-                let (start, mut end) = Self::find_match_anywhere(p, input, captures)?;
+    /// [`Fail`]: MatchResult::Fail
+    #[must_use]
+    fn is_fail(&self) -> bool {
+        matches!(self, Self::Fail(..))
+    }
+}
 
-                while let Some(next) = Self::find_match_at_start(p, &input[end..], captures) {
-                    end += next;
-                }
+#[derive(Debug)]
+struct MatcherState<'a> {
+    group_id: usize,
+    open_groups: Vec<(usize, usize)>,
+    captures: Vec<&'a str>,
+}
 
-                Some((start, end))
-            }
-            PatternElement::ZeroOrOne(p) => {
-                Self::find_match_anywhere(p, input, captures).or(Some((0, 0)))
-            }
-            PatternElement::Wildcard => Some((0, 1)),
-            PatternElement::Alternation(first, alt) => {
-                Self::matches_anywhere(first, input, captures)
-                    .or_else(|| Self::matches_anywhere(alt, input, captures))
-            }
-            PatternElement::Group(group) => {
-                let index = captures.len();
-                captures.push(String::new());
-                let result = Self::matches_anywhere(group, input, captures);
-                if let Some((start, end)) = result {
-                    captures[index] = input.get(start..end).unwrap_or_default().to_string();
-                }
+impl<'a> MatcherState<'a> {
+    fn new(group_id: usize, open_groups: Vec<(usize, usize)>, captures: Vec<&'a str>) -> Self {
+        Self {
+            group_id,
+            open_groups,
+            captures,
+        }
+    }
+}
 
-                result
-            }
-            PatternElement::BackRef(_) => unimplemented!("BackRef"),
+impl<'a> Matcher<'a> {
+    fn new(main_patterns: &'a [PatternElement]) -> Self {
+        Self {
+            patterns: main_patterns,
+            group_id: 0,
+            open_groups: Vec::new(),
+            captures: Vec::new(),
         }
     }
 
-    /// Matches the `pattern` at the start of `input` and returns the length of the match
-    /// (or alternatively an index one past the match).
+    fn new_from_middle(
+        main_patterns: &'a [PatternElement],
+        group_id: usize,
+        open_groups: Vec<(usize, usize)>,
+        captures: Vec<&'a str>,
+    ) -> Self {
+        Self {
+            patterns: main_patterns,
+            group_id,
+            open_groups,
+            captures,
+        }
+    }
+
+    fn matches(self, input: &'a str) -> bool {
+        for i in 0..input.len() {
+            let matcher = Matcher::new(self.patterns);
+            //println!("\n===\n trying to match {:?} on '{}'", self.patterns, input);
+            if matcher
+                .matches_at_start(&input[i..], &input[i..])
+                .is_success()
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[inline]
+    fn fail(self) -> MatchResult<'a> {
+        MatchResult::Fail(self.into_state())
+    }
+
+    #[inline]
+    fn success(self, match_len: usize) -> MatchResult<'a> {
+        MatchResult::Success(match_len, self.into_state())
+    }
+
+    #[inline]
+    fn into_state(self) -> MatcherState<'a> {
+        MatcherState::new(self.group_id, self.open_groups, self.captures)
+    }
+
+    /// Matches all patterns from the start of the input.
     ///
-    /// Returns `None` if there is no match.
-    fn find_match_at_start(
-        pattern: &PatternElement,
-        input: &str,
-        captures: &mut Vec<String>,
-    ) -> Option<usize> {
-        match pattern {
-            PatternElement::StartAnchor => Some(0),
-            PatternElement::Literal(c) if input.starts_with(*c) => Some(1),
-            PatternElement::Str(s) if input.starts_with(s) => Some(s.len()),
-            PatternElement::Literal(_) | PatternElement::Str(_) => None,
-            PatternElement::Digit => {
-                if let Some(c) = input.chars().next() {
-                    if !c.is_numeric() {
-                        return None;
+    /// Returns the number of characters matched and the captures or None if no match was found.
+    fn matches_at_start(mut self, full_input: &'a str, input: &'a str) -> MatchResult<'a> {
+        let mut input = input;
+        let start_input = input;
+
+        let patterns = self.patterns.iter().enumerate();
+        for (i, p) in patterns {
+            //println!("trying: {:?} on '{}'", p, input);
+
+            match p {
+                PatternElement::Literal(c) => {
+                    if !input.starts_with(*c) {
+                        return self.fail();
                     }
-                } else {
-                    return None;
+                    //println!("{p:?} matched '{}'", &input[..1]);
+                    input = input.get(1..).unwrap_or_default();
                 }
-
-                Some(1)
-            }
-            PatternElement::Alphanumeric => {
-                if let Some(c) = input.chars().next() {
-                    if !(c.is_ascii_alphanumeric() || c == '_') {
-                        return None;
+                PatternElement::Str(s) => {
+                    if !input.starts_with(s) {
+                        return self.fail();
                     }
-                } else {
-                    return None;
-                }
 
-                Some(1)
-            }
-            PatternElement::PosCharGroup(chars) => {
-                if let Some(c) = input.chars().next() {
-                    if !chars.contains(&c) {
-                        return None;
+                    //println!("{p:?} matched '{}'", &input[..s.len()]);
+                    input = input.get(s.len()..).unwrap_or_default();
+                }
+                PatternElement::Digit => {
+                    if let Some(c) = input.chars().next() {
+                        if !c.is_ascii_digit() {
+                            return self.fail();
+                        }
+                    } else {
+                        return self.fail();
                     }
-                } else {
-                    return None;
+                    //println!("{p:?} matched '{}'", &input[..1]);
+                    input = input.get(1..).unwrap_or_default();
                 }
-
-                Some(1)
-            }
-            PatternElement::NegCharGroup(chars) => {
-                if let Some(c) = input.chars().next() {
-                    if chars.contains(&c) {
-                        return None;
+                PatternElement::Alphanumeric => {
+                    if let Some(c) = input.chars().next() {
+                        if !(c.is_ascii_alphanumeric() || c == '_') {
+                            return self.fail();
+                        }
+                    } else {
+                        return self.fail();
                     }
-                } else {
-                    return None;
+                    //println!("{p:?} matched '{}'", &input[..1]);
+                    input = input.get(1..).unwrap_or_default();
                 }
-
-                Some(1)
-            }
-            PatternElement::EndAnchor => {
-                if input.chars().next().is_none() {
-                    Some(0)
-                } else {
-                    None
+                PatternElement::PosCharGroup(chars) => {
+                    if let Some(c) = input.chars().next() {
+                        if !chars.contains(&c) {
+                            return self.fail();
+                        }
+                    } else {
+                        return self.fail();
+                    }
+                    //println!("{p:?} matched '{}'", &input[..1]);
+                    input = input.get(1..).unwrap_or_default();
                 }
-            }
-            PatternElement::OneOrMore(p) => {
-                let mut end = Self::find_match_at_start(p, input, captures)?;
-
-                while let Some(next) = Self::find_match_at_start(p, &input[end..], captures) {
-                    end += next;
+                PatternElement::NegCharGroup(chars) => {
+                    if let Some(c) = input.chars().next() {
+                        if chars.contains(&c) {
+                            return self.fail();
+                        }
+                    } else {
+                        return self.fail();
+                    }
+                    // println!("{p:?} matched '{}'", &input[..1]);
+                    input = input.get(1..).unwrap_or_default();
                 }
-
-                Some(end)
-            }
-            PatternElement::ZeroOrOne(p) => {
-                Self::find_match_at_start(p, input, captures).or(Some(0))
-            }
-            PatternElement::Wildcard => Some(1),
-            PatternElement::Alternation(first, alt) => {
-                Self::match_patterns_at_start(first, input, captures)
-                    .or_else(|| Self::match_patterns_at_start(alt, input, captures))
-            }
-            PatternElement::Group(patterns) => {
-                let index = captures.len();
-                captures.push(String::new());
-                let result = Self::match_patterns_at_start(patterns, input, captures);
-                if let Some(end) = result {
-                    captures[index] = input.get(..end).unwrap_or_default().to_string();
+                PatternElement::EndAnchor => {
+                    if !input.is_empty() {
+                        return self.fail();
+                    }
                 }
+                PatternElement::Quantifier(p, min, max) => {
+                    #[derive(Debug)]
+                    struct Try<'a> {
+                        input: &'a str,
+                        inner_captures: Vec<&'a str>,
+                    }
 
-                result
-            }
-            PatternElement::BackRef(i) => {
-                assert!(*i > 0);
-                let capture = &captures[*i - 1];
-                if input.starts_with(capture) {
-                    Some(capture.len())
-                } else {
-                    None
+                    let p = p.as_ref();
+                    match p {
+                        PatternElement::GroupEnd => {
+                            unimplemented!("Repeated groups are not supported")
+                        }
+                        PatternElement::Quantifier(..) => {
+                            unimplemented!("Nested + quantifiers are not supported")
+                        }
+                        _ => {}
+                    }
+
+                    // Idea here is to match `p` as many times as possible and save the state after each match.
+                    // Then starting from the longest match try to match rest of the patterns.
+                    // First pattern combination that succeeds is the one we should match.
+
+                    let mut next_tries = Vec::new();
+                    let following_patterns = self.patterns.get(i + 1..).unwrap_or_default();
+
+                    let mut matches_count = 0;
+                    while let MatchResult::Success(match_len, state) =
+                        Matcher::new(std::slice::from_ref(p)).matches_at_start(full_input, input)
+                    {
+                        let MatcherState {
+                            captures: inner_captures,
+                            ..
+                        } = state;
+
+                        input = input.get(match_len..).unwrap_or_default();
+                        matches_count += 1;
+
+                        if matches_count < *min {
+                            continue;
+                        }
+                        next_tries.push(Try {
+                            input,
+                            inner_captures,
+                        });
+
+                        if let Some(max) = max {
+                            if matches_count >= *max {
+                                break;
+                            }
+                        }
+                    }
+
+                    if matches_count < *min {
+                        return self.fail();
+                    }
+
+                    if matches_count == 0 && *min == 0 {
+                        continue;
+                    }
+
+                    assert!(matches_count >= *min);
+                    assert!(matches_count <= max.unwrap_or(usize::MAX));
+
+                    let orig_captures_len = self.captures.len();
+
+                    //println!("next tries: {:?}", next_tries);
+                    for next in next_tries.into_iter().rev() {
+                        // add captures from the try if there were any,
+                        // if this try fails, make sure to remove them before next try!
+                        self.group_id += next.inner_captures.len();
+                        self.captures.extend(next.inner_captures);
+                        let captures = std::mem::take(&mut self.captures);
+                        let matcher = Matcher::new_from_middle(
+                            following_patterns,
+                            self.group_id,
+                            // we cannot mem::take open_groups because new matcher can also remove
+                            //items from it and thus we cannot easily restore the state after a failed try
+                            self.open_groups.clone(),
+                            captures,
+                        );
+
+                        match matcher.matches_at_start(full_input, next.input) {
+                            MatchResult::Success(match_len, state) => {
+                                //println!("{:?} matched '{}'", next.0, &next.1[..end]);
+                                input = next.input.get(match_len..).unwrap_or_default();
+                                // println!(
+                                //     "END: {:?} matched '{}'",
+                                //     self.main_patterns,
+                                //     &start_input[..start_input.len() - input.len()]
+                                // );
+
+                                return MatchResult::Success(
+                                    start_input.len() - input.len() + match_len,
+                                    state,
+                                );
+                            }
+                            MatchResult::Fail(state) => {
+                                self.captures = state.captures;
+
+                                self.captures.truncate(orig_captures_len);
+                            }
+                        }
+                    }
+
+                    return self.fail();
+                }
+                PatternElement::Wildcard => {
+                    input = input.get(1..).unwrap_or_default();
+                }
+                PatternElement::GroupStart => {
+                    self.group_id += 1;
+                    let id = self.group_id;
+                    self.captures.push("");
+                    self.open_groups.push((id, full_input.len() - input.len()));
+                }
+                PatternElement::GroupEnd => {
+                    let (id, start) = self.open_groups.pop().unwrap();
+                    let capture = &full_input[start..full_input.len() - input.len()];
+                    //println!("group matched '{capture}'",);
+                    self.captures[id - 1] = capture;
+                }
+                PatternElement::Alternation(lhs, rhs) => {
+                    let mut matched = false;
+
+                    let orig_captures_len = self.captures.len();
+                    let orig_group_id = self.group_id;
+
+                    for alt in [lhs, rhs] {
+                        let captures = std::mem::take(&mut self.captures);
+
+                        let matcher = Matcher::new_from_middle(
+                            alt,
+                            self.group_id,
+                            self.open_groups.clone(),
+                            captures,
+                        );
+
+                        match matcher.matches_at_start(full_input, input) {
+                            MatchResult::Success(match_len, state) => {
+                                input = input.get(match_len..).unwrap_or_default();
+                                self.captures = state.captures;
+                                self.open_groups = state.open_groups;
+                                self.group_id = state.group_id;
+                                matched = true;
+                                break;
+                            }
+                            MatchResult::Fail(state) => {
+                                self.captures = state.captures;
+
+                                self.captures.truncate(orig_captures_len);
+                                self.group_id = orig_group_id;
+                            }
+                        }
+                    }
+
+                    if !matched {
+                        return self.fail();
+                    }
+                }
+                PatternElement::BackRef(i) => {
+                    assert!(*i > 0);
+                    let capture = &self.captures[*i - 1];
+                    if !input.starts_with(capture) {
+                        return self.fail();
+                    }
+
+                    input = input.get(capture.len()..).unwrap_or_default();
                 }
             }
         }
-    }
-
-    fn match_patterns_at_start(
-        patterns: &[PatternElement],
-        mut input: &str,
-        captures: &mut Vec<String>,
-    ) -> Option<usize> {
-        let patterns = patterns.iter();
-        let mut end = 0;
-
-        for p in patterns {
-            let next_end = Self::find_match_at_start(p, input, captures)?;
-            input = input.get(next_end..).unwrap_or_default();
-            end += next_end;
-        }
-
-        Some(end)
+        // println!("captures: {:#?}", &self.captures);
+        // println!(
+        //     "END: {:?} matched '{}'",
+        //     self.main_patterns,
+        //     &start_input[..start_input.len() - input.len()]
+        // );
+        self.success(start_input.len() - input.len())
     }
 }
 
@@ -466,12 +573,11 @@ enum PatternElement {
     Alphanumeric,
     PosCharGroup(Vec<char>),
     NegCharGroup(Vec<char>),
-    StartAnchor,
     EndAnchor,
-    OneOrMore(Box<PatternElement>),
-    ZeroOrOne(Box<PatternElement>),
+    Quantifier(Box<PatternElement>, usize, Option<usize>),
     Wildcard,
-    Group(Vec<PatternElement>),
+    GroupStart,
+    GroupEnd,
     Alternation(Vec<PatternElement>, Vec<PatternElement>),
     BackRef(usize),
 }
@@ -506,6 +612,7 @@ mod tests {
     #[test]
     fn test_char_digit() {
         let regex = Regex::new(r"a\d");
+
         assert!(regex.matches("a1"));
         assert!(!regex.matches("apple2"));
         assert!(regex.matches("ba3"));
@@ -631,6 +738,36 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_group() {
+        let regex = Regex::new(r"a(b(g))");
+        dbg!(&regex);
+        assert!(regex.matches("abg"));
+        assert!(!regex.matches("dgg"));
+        assert!(!regex.matches("dys"));
+    }
+
+    #[test]
+    fn test_one_or_more_not_full() {
+        let regex = Regex::new(r"[^a]+, b");
+        dbg!(&regex);
+        assert!(regex.matches("bvd, b"));
+        let regex = Regex::new(r"([^a]+), b");
+        dbg!(&regex);
+        assert!(regex.matches("bvd, b"));
+        let regex = Regex::new(r"([^a]+)");
+        dbg!(&regex);
+        assert!(regex.matches("bvd, b"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Repeated groups are not supported")]
+    fn test_repeated_groups() {
+        let regex = Regex::new(r"(a)+");
+        dbg!(&regex);
+        assert!(regex.matches("a"));
+    }
+
+    #[test]
     fn test_alteration_single() {
         let regex = Regex::new(r"a|b");
         dbg!(&regex);
@@ -716,9 +853,9 @@ mod tests {
 
     #[test]
     fn test_nested_groups() {
-        let regex = Regex::new(r"(a (b\w (a)) (\d b))+");
+        let regex = Regex::new(r"(a (b\w (a)) (\d b))");
         dbg!(&regex);
-        assert!(regex.matches("a ba a 1 b"));
+        assert!(regex.matches("a ba a 1 b "));
     }
 
     #[test]
@@ -726,5 +863,16 @@ mod tests {
         let regex = Regex::new(r"('(cat) and \2') is the same as \1");
         dbg!(&regex);
         assert!(regex.matches("'cat and cat' is the same as 'cat and cat'"));
+    }
+
+    #[test]
+    fn test_nested_back_refs2() {
+        let regex = Regex::new(r"(([abc]+)-([def]+)) is \1, not ([^xyz]+),");
+        dbg!(&regex);
+        assert!(regex.matches("abc-def is abc-def, not efg, abc, or def"));
+
+        let regex = Regex::new(r"(([abc]+)-([def]+)) is abc-def, not ([^xyz]+), abc, or def");
+        dbg!(&regex);
+        assert!(regex.matches("abc-def is abc-def, not efg, abc, or def"));
     }
 }
